@@ -538,19 +538,44 @@ def wikidata_official_domains(affiliation, timeout=8, lang="en"):
 # Web サイトのタイトル(補助シグナル)
 # ----------------------------------------------------------------------------
 
-def website_title(domain, timeout=6):
-    """ドメインのトップページの <title> を取得。失敗時は None。"""
+def website_probe(domain, timeout=6):
+    """
+    ドメインのトップページを取得し (url, title) を返す。
+      url   : 実際に到達したページのURL(リダイレクト後)。ページが無ければ None。
+      title : <title> の文字列。無ければ None(ページ自体は存在し得る)。
+    https を優先し、ダメなら http を試す。
+    """
     if not domain:
-        return None
+        return None, None
+    ctx = ssl.create_default_context()
     for scheme in ("https://", "http://"):
-        html = http_get_text(scheme + domain, timeout)
-        if html:
-            m = re.search(r"<title[^>]*>(.*?)</title>", html,
-                          re.IGNORECASE | re.DOTALL)
-            if m:
-                title = re.sub(r"\s+", " ", m.group(1)).strip()
-                return title[:200] if title else None
-    return None
+        url0 = scheme + domain
+        try:
+            req = request.Request(url0, headers={"User-Agent": USER_AGENT,
+                                                 "Accept": "text/html,*/*"})
+            with request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                if resp.status >= 400:
+                    continue
+                final_url = resp.geturl() or url0
+                raw = resp.read(200000)
+                charset = resp.headers.get_content_charset() or "utf-8"
+                html = raw.decode(charset, errors="replace")
+        except (URLError, HTTPError, socket.timeout, ssl.SSLError,
+                ConnectionError, OSError):
+            continue
+        title = None
+        m = re.search(r"<title[^>]*>(.*?)</title>", html,
+                      re.IGNORECASE | re.DOTALL)
+        if m:
+            t = re.sub(r"\s+", " ", m.group(1)).strip()
+            title = t[:200] if t else None
+        return final_url, title
+    return None, None
+
+
+def website_title(domain, timeout=6):
+    """互換用: タイトルのみ返す薄いラッパー。"""
+    return website_probe(domain, timeout=timeout)[1]
 
 
 # ----------------------------------------------------------------------------
@@ -993,6 +1018,7 @@ def evaluate(name, org, email, timeout=8, do_website=True, do_wikidata=True,
         "domain": domain,
         "exists": "no",
         "confidence": 0,
+        "url": "",
         "evidence": evidence,
         "notes": "",
         "export_risk_level": 0,
@@ -1141,11 +1167,14 @@ def evaluate(name, org, email, timeout=8, do_website=True, do_wikidata=True,
     if inst:
         evidence.append(("TLD種別", "教育/政府系(機関ドメイン)"))
 
-    # --- Web サイトタイトル照合 -------------------------------------------
+    # --- Web サイトの存在確認 & タイトル照合 ------------------------------
     # MX のみ確認できた場合でも試行する(名前解決が制限される環境のフォールバック)。
     s_title = 0.0
+    web_url = ""
     if do_website and (resolves or mx is True):
-        title = website_title(reg, timeout=min(timeout, 6))
+        web_url, title = website_probe(reg, timeout=min(timeout, 6))
+        if web_url:
+            evidence.append(("Webページ", web_url))
         if title:
             s_title = name_match_score(org, title)
             evidence.append(("サイトtitle", "'%s' (一致 %d%%)"
@@ -1194,6 +1223,10 @@ def evaluate(name, org, email, timeout=8, do_website=True, do_wikidata=True,
 
     result["confidence"] = int(confidence)
     result["exists"] = "yes" if confidence >= threshold else "no"
+
+    # 実在性が yes かつ当該ドメインのWebページが存在する場合、そのURLを結果に含める。
+    if result["exists"] == "yes" and web_url:
+        result["url"] = web_url
 
     # --- no の場合は必ず理由を付与する -----------------------------------
     if result["exists"] == "no":
@@ -1305,6 +1338,8 @@ def print_single(res, verbose, show_risk=True):
     print("ドメイン      : %s" % res["domain"])
     print("組織の実在性  : %s" % res["exists"].upper())
     print("確度          : %d%%" % res["confidence"])
+    if res.get("url"):
+        print("WebページURL  : %s" % res["url"])
     if res["notes"]:
         print("備考          : %s" % res["notes"])
     if show_risk:
@@ -1327,14 +1362,14 @@ def write_csv(results, out, show_risk=True):
     show_risk=False で輸出管理リスクの列を出力しない。"""
     if show_risk:
         fields = ["name", "organization", "email", "domain", "exists",
-                  "confidence", "export_risk", "export_risk_rationale", "notes"]
+                  "confidence", "url", "export_risk", "export_risk_rationale", "notes"]
         headers_jp = ["氏名", "所属名", "メールアドレス", "ドメイン", "組織の実在性",
-                      "確度(%)", "輸出管理リスク", "リスク根拠", "備考"]
+                      "確度(%)", "WebページURL", "輸出管理リスク", "リスク根拠", "備考"]
     else:
         fields = ["name", "organization", "email", "domain", "exists",
-                  "confidence", "notes"]
+                  "confidence", "url", "notes"]
         headers_jp = ["氏名", "所属名", "メールアドレス", "ドメイン",
-                      "組織の実在性", "確度(%)", "備考"]
+                      "組織の実在性", "確度(%)", "WebページURL", "備考"]
     f = open(out, "w", newline="", encoding="utf-8-sig") if out else sys.stdout
     try:
         writer = csv.writer(f)
@@ -1389,9 +1424,9 @@ def build_parser():
 
 
 JSON_FIELDS_BASE = ["name", "organization", "email", "domain", "exists",
-                    "confidence", "notes"]
+                    "confidence", "url", "notes"]
 JSON_FIELDS_RISK = ["name", "organization", "email", "domain", "exists",
-                    "confidence", "export_risk", "export_risk_rationale", "notes"]
+                    "confidence", "url", "export_risk", "export_risk_rationale", "notes"]
 
 
 def main(argv=None):
