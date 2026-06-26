@@ -14,12 +14,45 @@
 ローカルPCでの動作を想定し、**Python 標準ライブラリのみ**（追加 `pip install` 不要）で動きます。
 必要環境: Python 3.8 以上、インターネット接続。
 
-## クイックスタート
+## インストール
+
+単一ファイル・**標準ライブラリのみ**で動くため、`pip install` は不要です。
+前提は **Python 3.8 以上**とインターネット接続のみ。
+
+まず Python を確認します（3.8 以上ならOK）:
+
+```bash
+python3 --version    # Windows は py -3 --version
+```
+
+### 方法1: git clone（推奨・更新が容易）
 
 ```bash
 git clone https://github.com/fumiyoshi-shoji/mail2affiliation.git
 cd mail2affiliation
+```
 
+更新したいときは `git pull` するだけです。
+
+### 方法2: ダウンロード（git 不要）
+
+GitHub の **Code → Download ZIP** で取得・解凍するか、本体1ファイルだけ取得します:
+
+```bash
+curl -O https://raw.githubusercontent.com/fumiyoshi-shoji/mail2affiliation/main/mail2affiliation.py
+```
+
+### 方法3: どこからでも呼べるようにする（任意・macOS/Linux）
+
+```bash
+chmod +x mail2affiliation.py
+ln -s "$(pwd)/mail2affiliation.py" /usr/local/bin/mail2affiliation   # PATH の通った場所へ
+# 以降は: mail2affiliation --email taro@riken.jp --org 理化学研究所
+```
+
+## クイックスタート
+
+```bash
 # 1) 輸出管理スクリーニング用の公開リストを取得（初回のみ／約80MB）
 python3 mail2affiliation.py --update-lists
 
@@ -29,6 +62,18 @@ python3 mail2affiliation.py --name "山田太郎" --org "理化学研究所" --e
 # 3) CSV を一括評価
 python3 mail2affiliation.py --csv examples/test_input_50.csv --out result.csv
 ```
+
+**Windows（PowerShell / コマンドプロンプト）の場合:**
+
+```powershell
+git clone https://github.com/fumiyoshi-shoji/mail2affiliation.git
+cd mail2affiliation
+py -3 mail2affiliation.py --update-lists
+py -3 mail2affiliation.py --csv examples\test_input_50.csv --out result.csv
+```
+
+> `--update-lists` を省くと輸出管理リスクは「判定不可」になります（実在性チェックは動作します）。
+> 取得したリストは `screening_lists/` に保存され、2回目以降は自動で読み込まれます。
 
 ## リポジトリ構成
 
