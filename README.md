@@ -17,7 +17,7 @@
 ## クイックスタート
 
 ```bash
-git clone https://github.com/<your-account>/mail2affiliation.git
+git clone https://github.com/fumiyoshi-shoji/mail2affiliation.git
 cd mail2affiliation
 
 # 1) 輸出管理スクリーニング用の公開リストを取得（初回のみ／約80MB）
