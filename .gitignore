@@ -1,0 +1,22 @@
+# ダウンロード済みスクリーニングリスト(大容量・各自取得)とキャッシュ
+screening_lists/
+.wikidata_cache.json
+
+# 実行結果・一時ファイル
+result_*.csv
+*.out.csv
+err.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / エディタ
+.DS_Store
+*.swp
+.idea/
+.vscode/
