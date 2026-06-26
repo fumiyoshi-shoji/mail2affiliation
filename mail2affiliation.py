@@ -120,6 +120,16 @@ ORG_STOPWORDS = {
     "kabushiki", "kaisha",
 }
 
+# 頭字語生成専用のストップワード。機関種別語(university/institute 等)は
+# 頭字語の構成要素になるため除去しない(例: Massachusetts Institute of
+# Technology -> mit)。冠詞・接続詞・前置詞と法人格を表す一般接尾語のみ除く。
+ACRONYM_STOPWORDS = {
+    "inc", "incorporated", "corp", "corporation", "co", "company", "ltd",
+    "limited", "llc", "llp", "plc", "gmbh", "ag", "sa", "srl", "spa", "bv",
+    "nv", "kk", "pte", "pty", "kabushiki", "kaisha",
+    "the", "of", "and", "for",
+}
+
 # 日本語の組織サフィックス(正規化で除去)
 JP_ORG_SUFFIXES = ["株式会社", "有限会社", "合同会社", "一般社団法人", "公益社団法人",
                    "一般財団法人", "公益財団法人", "独立行政法人", "国立研究開発法人",
@@ -206,7 +216,7 @@ def acronym(s):
     for suf in JP_ORG_SUFFIXES:
         s = s.replace(suf, " ")
     s = re.sub(r"[\W_]+", " ", s, flags=re.UNICODE)
-    words = [w for w in s.split() if w and w not in ORG_STOPWORDS]
+    words = [w for w in s.split() if w and w not in ACRONYM_STOPWORDS]
     return "".join(w[0] for w in words if w)
 
 
@@ -220,13 +230,22 @@ def _score_norm(a, acr_a, c):
     ta, tc = set(a.split()), set(c.split())
     jac = len(ta & tc) / len(ta | tc) if (ta | tc) else 0.0
     # 3. 包含(片方がもう片方を含む)
+    # 部分文字列一致は、短い名称が無関係な長い名称に偶然含まれて誤一致する
+    # (例: "abc" ⊂ "abcdeflongname")のを避けるため、長さガードを課す:
+    # 短い側が4文字以上、かつ長い側の半分以上の長さであること。
+    # トークン包含(issubset)はより意味的なので従来どおり救済に用いる。
     cont = 0.0
-    if a in c or c in a:
-        cont = 0.92
-    elif ta and ta.issubset(tc):
-        cont = 0.85
-    elif tc and tc.issubset(ta):
-        cont = 0.8
+    if a == c:
+        cont = 1.0
+    else:
+        shorter, longer = (a, c) if len(a) <= len(c) else (c, a)
+        if (shorter and shorter in longer and len(shorter) >= 4
+                and len(shorter) * 2 >= len(longer)):
+            cont = 0.92
+        elif ta and ta.issubset(tc):
+            cont = 0.85
+        elif tc and tc.issubset(ta):
+            cont = 0.8
     # 4. 頭字語一致 (a の頭字語 == c の連結 or 逆)
     c_joined = c.replace(" ", "")
     acr_match = 0.0
@@ -312,12 +331,21 @@ def has_mx(domain, timeout=4, resolvers=("1.1.1.1", "8.8.8.8")):
     """
     if not domain:
         return None
-    # ヘッダ(トランザクションID固定、RD=1)
-    header = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
-    qname = b"".join(bytes([len(p)]) + p.encode("idna") if False else
-                     bytes([len(p)]) + p.encode("ascii", "ignore")
-                     for p in domain.split("."))
-    qname += b"\x00"
+    # ヘッダ(トランザクションID、RD=1)
+    txid = 0x1234
+    header = struct.pack(">HHHHHH", txid, 0x0100, 1, 0, 0, 0)
+    # 各ラベルは IDNA でエンコードし、長さプレフィックスは実バイト長で付与する
+    # (日本語等の国際化ドメインでも正しい長さになる)。
+    labels = []
+    for p in domain.split("."):
+        if not p:
+            continue
+        try:
+            enc = p.encode("idna")
+        except (UnicodeError, ValueError):
+            enc = p.encode("ascii", "ignore")
+        labels.append(bytes([len(enc)]) + enc)
+    qname = b"".join(labels) + b"\x00"
     question = qname + struct.pack(">HH", 15, 1)  # QTYPE=MX(15), QCLASS=IN(1)
     packet = header + question
 
@@ -327,9 +355,22 @@ def has_mx(domain, timeout=4, resolvers=("1.1.1.1", "8.8.8.8")):
         try:
             sock.sendto(packet, (server, 53))
             data, _ = sock.recvfrom(2048)
-            if len(data) >= 8:
-                ancount = struct.unpack(">H", data[6:8])[0]
-                return ancount > 0
+            if len(data) < 12:
+                continue
+            rid, flags, _qd, ancount = struct.unpack(">HHHH", data[:8])
+            # 自分のクエリへの応答であることを検証:
+            #   - トランザクションID一致(スプーフ/取り違え対策)
+            #   - QR=1(応答ビット)
+            if rid != txid or not (flags & 0x8000):
+                continue
+            rcode = flags & 0x000F
+            if rcode != 0:
+                # NXDOMAIN(3)=ドメイン非存在 → MX なしと確定。
+                # SERVFAIL/REFUSED 等は不明として次のリゾルバへ。
+                if rcode == 3:
+                    return False
+                continue
+            return ancount > 0
         except (socket.timeout, OSError):
             continue
         finally:
@@ -1048,7 +1089,9 @@ def evaluate(name, org, email, timeout=8, do_website=True, do_wikidata=True,
 
     # --- DNS 存在確認 -----------------------------------------------------
     resolves = domain_resolves(domain, timeout=min(timeout, 5))
-    mx = has_mx(reg, timeout=min(timeout, 5))
+    # MX はメール配送先(=@以降のドメインそのもの)で決まるため、登録可能
+    # ドメイン(eTLD+1)ではなく完全なドメインで問い合わせる。
+    mx = has_mx(domain, timeout=min(timeout, 5))
     evidence.append(("DNS解決", "成功" if resolves else "失敗"))
     if mx is not None:
         evidence.append(("MXレコード", "あり" if mx else "なし"))
@@ -1357,6 +1400,16 @@ def print_single(res, verbose, show_risk=True):
     print("─" * 60)
 
 
+def _csv_safe(value):
+    """CSVインジェクション対策。Excel/Sheets等で数式として実行され得る先頭文字
+    (= + - @ およびタブ・改行)で始まるセルを ' を前置して無害化する。
+    外部由来(RDAP登録者名・Wikidataラベル・サイトtitle等)を含むため必須。"""
+    s = "" if value is None else str(value)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
+
+
 def write_csv(results, out, show_risk=True):
     """結果を CSV 形式で書き出す(out はファイルパス or None=標準出力)。
     show_risk=False で輸出管理リスクの列を出力しない。"""
@@ -1375,7 +1428,7 @@ def write_csv(results, out, show_risk=True):
         writer = csv.writer(f)
         writer.writerow(headers_jp)
         for r in results:
-            writer.writerow([r[k] for k in fields])
+            writer.writerow([_csv_safe(r[k]) for k in fields])
     finally:
         if out:
             f.close()
